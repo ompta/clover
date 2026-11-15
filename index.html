@@ -20,6 +20,7 @@
   #ui .sub { opacity: .82; font-size: 12.5px; }
   #ui .legend { opacity: .9; font-size: 12px; }
   #ui .stat { opacity: .8; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  #ui .stage { opacity: .96; font-size: 12.5px; font-variant-numeric: tabular-nums; }
   #btn {
     position: fixed; right: 14px; top: 12px; pointer-events: auto;
     display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;
@@ -97,8 +98,11 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
    田园 三次元  —  Japanese countryside, procedural terrain + authored clover GLBs
    terrain · river · stone bridge · rice terraces · trees · rocks ·
    mountains · farmhouse · waterwheel · power lines · egrets · petals ·
-   clover plot (10 × 3-leaf + 1 × 4-leaf from the authored 3clover.glb / 4clover.glb in this folder,
-   ring + pegs + sign + marker beam, ahead of roam start; GLBs fall back to procedural clovers if unfetchable)
+   clover hunt (4 stages, every one of them using the authored 3clover.glb / 4clover.glb in this folder:
+   10 → 20 → 30 → 45 three-leaf + 1 four-leaf, plot area 1× → 10× → 50× → 100× the stage 1 area; the counts
+   are capped by a ~1M verts/frame budget because one authored plant is 20,355 verts; ring + pegs + sign +
+   marker beam, ahead of roam start; tapping the 4-leaf clover clears the stage and replants the next one;
+   GLBs fall back to procedural clovers if unfetchable)
    ===================================================================== */
 
 const WORLD = 340;          // terrain extent (metres)
@@ -321,7 +325,7 @@ function heightAt(x, z) {
   return h;
 }
 
-/* ---------- clover plot: one small marked area holding 10 three-leaf + 1 four-leaf clover ---------- */
+/* ---------- clover plot: the marked area the hunt starts in (it grows with each stage) ---------- */
 const roamAnchor = (() => {                       // where roam mode drops the player, and which way it faces
   const p = roadCurve.getPointAt(0.4), t = roadCurve.getTangentAt(0.4).setY(0).normalize();
   return { x: p.x, z: p.z, fx: t.x, fz: t.z };
@@ -1081,8 +1085,8 @@ const grassMeshes = addInstanced(grassList, [makeGrassClump(3), makeGrassClump(1
   makeWindMaterial('#ffffff', 0.075, 0.9),
   (it, p, q, s) => { p.set(it.x, it.y - 0.03, it.z); q.setFromAxisAngle(UP, it.rot); s.set(it.s, it.s * (0.8 + it.t * 0.6), it.s); },
   (it) => { _col.setRGB(0.78 + it.t * 0.3, 0.92 + it.t * 0.2, 0.66 + it.t * 0.3); return _col; });
-/* ---------- clover plot: ten 3-leaf + exactly one 4-leaf clover, ringed by a drawn outline ---------- */
-function makeCloverLeafletGeo(size) {   // obcordate leaflet: heart-cleft tip, widest below the middle
+/* ---------- clover plants: the current stage's field, rebuilt by buildCloverField ---------- */
+function makeCloverLeafletGeo(size, curveSegs = 7) {   // obcordate leaflet: heart-cleft tip, widest below the middle
   const s = new THREE.Shape();
   s.moveTo(0, 0);                                       // petiole joint
   s.bezierCurveTo(size * 0.28, size * 0.03, size * 0.50, size * 0.32, size * 0.52, size * 0.58);
@@ -1091,7 +1095,7 @@ function makeCloverLeafletGeo(size) {   // obcordate leaflet: heart-cleft tip, w
   s.quadraticCurveTo(-size * 0.07, size * 0.87, -size * 0.21, size * 1.00);
   s.bezierCurveTo(-size * 0.36, size * 0.95, -size * 0.53, size * 0.78, -size * 0.52, size * 0.58);
   s.bezierCurveTo(-size * 0.50, size * 0.32, -size * 0.28, size * 0.03, 0, 0);
-  const g = new THREE.ExtrudeGeometry(s, { depth: size * 0.028, bevelEnabled: false, curveSegments: 7 });
+  const g = new THREE.ExtrudeGeometry(s, { depth: size * 0.028, bevelEnabled: false, curveSegments: curveSegs });
   g.translate(0, 0, -size * 0.014);                     // slab centred on the leaf plane
   g.rotateX(Math.PI / 2);                               // leaf in XZ, tip toward +Z
   const p = g.attributes.position.array;
@@ -1103,17 +1107,19 @@ function makeCloverLeafletGeo(size) {   // obcordate leaflet: heart-cleft tip, w
   g.computeVertexNormals();
   return g;
 }
-function makeCloverPetioleGeo(len, out, rad) {   // leaf stalk: arches out and up from the node
+function makeCloverPetioleGeo(len, out, rad, segs = 9, radial = 5) {   // leaf stalk: arches out and up from the node
   const c = new THREE.CatmullRomCurve3([
     new THREE.Vector3(0, 0, 0),
     new THREE.Vector3(0, len * 0.42, out * 0.22),
     new THREE.Vector3(0, len * 0.78, out * 0.62),
     new THREE.Vector3(0, len, out)
   ]);
-  return new THREE.TubeGeometry(c, 9, rad, 5, false);
+  return new THREE.TubeGeometry(c, segs, rad, radial, false);
 }
-function makeCloverGeo(seed, leafCount, scale) {
+const CLOVER_LOD = [[2, 3, 3], [3, 4, 3], [4, 6, 4], [7, 9, 5]];   // lod 0..3 → [leaflet curveSegments, petiole tubular, petiole radial]
+function makeCloverGeo(seed, leafCount, scale, lod = 3) {
   const rnd = makeRng(seed), parts = [];
+  const cs = CLOVER_LOD[lod][0], ps = CLOVER_LOD[lod][1], pr = CLOVER_LOD[lod][2];
   const petH = (0.21 + rnd() * 0.06) * scale;           // petiole rise above the sward
   const outR = (0.07 + rnd() * 0.03) * scale;           // how far the head sits from the node
   const leafR = (0.115 + rnd() * 0.02) * scale;         // leaflet length
@@ -1126,11 +1132,11 @@ function makeCloverGeo(seed, leafCount, scale) {
     const a = spin + (i / leafCount) * 6.283185 + (rnd() - 0.5) * 0.22;
     const len = petH * (0.86 + rnd() * 0.24);
     const out = outR * (0.8 + rnd() * 0.45);
-    const pet = makeCloverPetioleGeo(len, out, thick * 0.9);
+    const pet = makeCloverPetioleGeo(len, out, thick * 0.9, ps, pr);
     pet.rotateY(a);
     parts.push(paint(pet, '#4d7a38'));
     const tilt = 0.16 + rnd() * 0.24;                   // leaflet held up on its stalk
-    const lf = makeCloverLeafletGeo(leafR * (0.92 + rnd() * 0.18));
+    const lf = makeCloverLeafletGeo(leafR * (0.92 + rnd() * 0.18), cs);
     lf.rotateZ((rnd() - 0.5) * 0.24);                   // a touch of twist so no two leaves match
     lf.rotateX(-tilt);
     lf.rotateY(a);                                      // tip points away from the node
@@ -1213,24 +1219,72 @@ const cloverGeos = cloverGlbs ? cloverGlbs.geos : [makeCloverGeo(71, 3, 3.1), ma
 const cloverMats = cloverGlbs
   ? [makeWindMaterial('#ffffff', 0.05, 0.72, cloverGlbs.maps[0]), makeWindMaterial('#ffffff', 0.05, 0.72, cloverGlbs.maps[1])]
   : [makeWindMaterial('#ffffff', 0.05, 0.72), makeWindMaterial('#ffffff', 0.05, 0.72)];
-const cloverList = [];
-{
-  const rnd = makeRng(1409);
-  const N = 11;                                   // ten 3-leaf + one 4-leaf, nothing else
+/* ---------- clover hunt: four stages, each cleared by tapping the single 4-leaf clover ---------- */
+/* Every stage uses the authored GLB plants (lod 3), so the plant looks identical all the way through.
+   Vertex budget: glbCloverGeo() merges the GLB and calls toNonIndexed(), so one 3-leaf plant is 20,355
+   verts / 6,785 tris and one 4-leaf plant is 26,748 verts. Instancing uploads that geometry once, but the
+   per-frame load is plants × verts, so keeping stage 4 under ~1M verts caps the field at ~46 plants.
+   The counts therefore grow gently while the plot areas still follow 1× → 10× → 50× → 100×. */
+const STAGES = [
+  { three: 10, four: 1, area: 1,   lod: 3 },   // 11 plants · 230k verts · the stage 1 area
+  { three: 20, four: 1, area: 10,  lod: 3 },   // 21 plants · 434k verts · 10× the stage 1 area
+  { three: 30, four: 1, area: 50,  lod: 3 },   // 31 plants · 637k verts · 5× the stage 2 area
+  { three: 45, four: 1, area: 100, lod: 3 }    // 46 plants · 943k verts · 2× the stage 3 area
+];
+const cloverLodGeos = [];                       // [lod] → [3-leaf geo, 4-leaf geo]; lod 3 = authored GLBs
+const cloverLodMats = [];                       // one wind-shaded material pair per lod (map only on the authored one)
+function cloverGeoFor(lod) {
+  if (!cloverLodGeos[lod]) {
+    cloverLodGeos[lod] = lod === 3 ? cloverGeos
+      : [makeCloverGeo(71, 3, 3.1, lod), makeCloverGeo(97, 4, 3.9, lod)];
+  }
+  return cloverLodGeos[lod];
+}
+function cloverMatsFor(lod) {
+  if (!cloverLodMats[lod]) {
+    cloverLodMats[lod] = lod === 3 ? cloverMats
+      : [makeWindMaterial('#ffffff', 0.05, 0.72), makeWindMaterial('#ffffff', 0.05, 0.72)];
+  }
+  return cloverLodMats[lod];
+}
+const applyClover = (it, p, q, s) => { p.set(it.x, it.y - 0.01, it.z); q.setFromAxisAngle(UP, it.rot); s.set(it.s, it.s, it.s); };
+const tintClover = (it) => { _col.setRGB(0.88 + it.t * 0.24, 0.94 + it.t * 0.18, 0.76 + it.t * 0.3); return _col; };
+
+let stage = 1;                                  // 1..STAGES.length; STAGES.length + 1 = hunt cleared
+let fieldR = cloverPatch.r;                     // searchable radius of the current stage
+let cloverList = [];
+let cloverMeshes = [];
+let cloverFourMeshes = [];                      // the instanced meshes holding the single 4-leaf plant
+let fourLeaf = null;                            // the one 4-leaf plant of the current stage (the hunt target)
+
+function buildCloverField(s) {
+  const cfg = STAGES[s - 1];
+  fieldR = cloverPatch.r * Math.sqrt(cfg.area);   // area ratios → radius ratio is the square root
+  const rnd = makeRng(1409 + s * 977);
+  const N = cfg.three + cfg.four;
   const fourIdx = (rnd() * N) | 0;
+  const list = [];
   for (let i = 0; i < N; i++) {
     const t = (i + 0.5) / N;
-    const rad = cloverPatch.r * 0.62 * Math.sqrt(t);
+    const rad = fieldR * 0.62 * Math.sqrt(t);
     const ang = i * 2.399963 + (rnd() - 0.5) * 0.6;
     const x = cloverPatch.x + Math.cos(ang) * rad, z = cloverPatch.z + Math.sin(ang) * rad;
     const four = i === fourIdx;
-    cloverList.push({ x, z, y: heightAt(x, z), rot: rnd() * 6.283185, sp: four ? 1 : 0,
-      s: four ? 1.12 + rnd() * 0.1 : 0.86 + rnd() * 0.24, t: rnd() });
+    list.push({ x, z, y: heightAt(x, z), rot: rnd() * 6.283185, sp: four ? 1 : 0,
+      s: four ? 1.12 + rnd() * 0.1 : 0.86 + rnd() * 0.24, t: rnd() });   // same plant size at every stage
   }
+  const geos = cloverGeoFor(cfg.lod), mats = cloverMatsFor(cfg.lod);
+  const threeList = [], fourList = [];
+  for (const it of list) (it.sp === 1 ? fourList : threeList).push(it);
+  for (const im of cloverMeshes) { scene.remove(im); im.dispose(); }   // geos/mats stay cached for the next stage
+  cloverMeshes = addInstanced(threeList, [geos[0]], mats[0], applyClover, tintClover)
+    .concat(addInstanced(fourList, [geos[1]], mats[1], applyClover, tintClover));
+  cloverFourMeshes = [cloverMeshes[cloverMeshes.length - 1]];
+  fourLeaf = fourList.length ? fourList[0] : null;   // the hunt target for this stage
+  if (N > 200) for (const im of cloverMeshes) im.castShadow = false;   // safety net: 200+ × 20k-vert plants would flood the shadow pass
+  cloverList = list;
 }
-const cloverMeshes = addInstanced(cloverList, cloverGeos, cloverMats,
-  (it, p, q, s) => { p.set(it.x, it.y - 0.01, it.z); q.setFromAxisAngle(UP, it.rot); s.set(it.s, it.s, it.s); },
-  (it) => { _col.setRGB(0.88 + it.t * 0.24, 0.94 + it.t * 0.18, 0.76 + it.t * 0.3); return _col; });
+buildCloverField(1);
 function makeCloverFlowerGeo(seed, scale) {             // pink-white clover head on a bare stalk
   const rnd = makeRng(seed);
   const h = (0.30 + rnd() * 0.10) * scale;
@@ -1269,6 +1323,23 @@ const cloverFlowers = addInstanced(cloverFlowerList, [makeCloverFlowerGeo(13, 3.
   makeWindMaterial('#ffffff', 0.06, 0.8),
   (it, p, q, s) => { p.set(it.x, it.y - 0.01, it.z); q.setFromAxisAngle(UP, it.rot); s.set(it.s, it.s, it.s); },
   (it) => { _col.setRGB(0.92 + it.t * 0.14, 0.86 + it.t * 0.16, 0.80 + it.t * 0.2); return _col; });
+/* ---------- plot markers: ring + pegs + sign + turf + marker beam, rebuilt for each stage's field ---------- */
+let cloverRing = null, cloverRingInner = null, cloverPegs = [], cloverTurf = null;
+let cloverSignX = 0, cloverSignY = 0, cloverSignZ = 0, cloverSignAng = 0;
+const cloverBeaconH = 15;                         // light column so the plot reads from anywhere
+const plotObjects = [];                           // everything buildCloverPlot added, so a stage change can free it
+function clearCloverPlot() {
+  for (const o of plotObjects) {
+    scene.remove(o);
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      const ms = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of ms) { if (m.map) m.map.dispose(); m.dispose(); }
+    }
+  }
+  plotObjects.length = 0;
+}
+function buildCloverPlot(r) {
 function makeCloverRingGeo(radius, segs, yOff) {  // outline of the marked plot, hugging the terrain
   const pos = new Float32Array(segs * 3);
   for (let i = 0; i < segs; i++) {
@@ -1280,13 +1351,13 @@ function makeCloverRingGeo(radius, segs, yOff) {  // outline of the marked plot,
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   return g;
 }
-const cloverRing = new THREE.LineLoop(makeCloverRingGeo(cloverPatch.r, 144, 0.05),
-  new THREE.LineBasicMaterial({ color: '#f7ecbf', transparent: true, opacity: 0.95, depthWrite: false }));
-scene.add(cloverRing);
-const cloverRingInner = new THREE.LineLoop(makeCloverRingGeo(cloverPatch.r - 0.45, 108, 0.045),
-  new THREE.LineDashedMaterial({ color: '#f2e7bf', transparent: true, opacity: 0.6, dashSize: 0.34, gapSize: 0.24, depthWrite: false }));
-cloverRingInner.computeLineDistances();
-scene.add(cloverRingInner);
+  cloverRing = new THREE.LineLoop(makeCloverRingGeo(r, 144, 0.05),
+    new THREE.LineBasicMaterial({ color: '#f7ecbf', transparent: true, opacity: 0.95, depthWrite: false }));
+  scene.add(cloverRing);
+  cloverRingInner = new THREE.LineLoop(makeCloverRingGeo(r - 0.45, 108, 0.045),
+    new THREE.LineDashedMaterial({ color: '#f2e7bf', transparent: true, opacity: 0.6, dashSize: 0.34, gapSize: 0.24, depthWrite: false }));
+  cloverRingInner.computeLineDistances();
+  scene.add(cloverRingInner);
 const cloverPegGeo = mergeGeos([
   paint(new THREE.CylinderGeometry(0.018, 0.026, 0.34, 5, 1, true), '#8d7350'),
   (() => { const cap = new THREE.CylinderGeometry(0.038, 0.038, 0.06, 6); cap.translate(0, 0.37, 0); return paint(cap, '#f0e8d2'); })()
@@ -1294,13 +1365,13 @@ const cloverPegGeo = mergeGeos([
 const cloverPegList = [];
 for (let i = 0; i < 4; i++) {
   const a = i * 1.570796 + 0.785398;
-  const x = cloverPatch.x + Math.cos(a) * (cloverPatch.r + 0.18), z = cloverPatch.z + Math.sin(a) * (cloverPatch.r + 0.18);
+  const x = cloverPatch.x + Math.cos(a) * (r + 0.18), z = cloverPatch.z + Math.sin(a) * (r + 0.18);
   cloverPegList.push({ x, z, y: heightAt(x, z), rot: a, s: 1, t: i * 0.2, sp: 0 });
 }
-const cloverPegs = addInstanced(cloverPegList, [cloverPegGeo],
+  cloverPegs = addInstanced(cloverPegList, [cloverPegGeo],
   new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8, metalness: 0.05 }),
   (it, p, q, s) => { p.set(it.x, it.y - 0.05, it.z); q.setFromAxisAngle(UP, it.rot); s.set(1, 1, 1); }, null);
-function makeCloverSignTex() {                    // face of the plot sign: cream board + clover glyph
+  function makeCloverSignTex() {                    // face of the plot sign: cream board + clover glyph
   const t = newCanvas(128), c = t.ctx;
   c.fillStyle = '#f1e8cd'; c.fillRect(0, 0, 128, 128);
   c.fillStyle = 'rgba(150,132,102,0.14)';
@@ -1317,10 +1388,10 @@ function makeCloverSignTex() {                    // face of the plot sign: crea
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
-const cloverSignAng = Math.atan2(roamAnchor.x - cloverPatch.x, roamAnchor.z - cloverPatch.z);
-const cloverSignX = cloverPatch.x + Math.sin(cloverSignAng) * (cloverPatch.r + 0.45);
-const cloverSignZ = cloverPatch.z + Math.cos(cloverSignAng) * (cloverPatch.r + 0.45);
-const cloverSignY = heightAt(cloverSignX, cloverSignZ);
+  cloverSignAng = Math.atan2(roamAnchor.x - cloverPatch.x, roamAnchor.z - cloverPatch.z);
+  cloverSignX = cloverPatch.x + Math.sin(cloverSignAng) * (r + 0.45);
+  cloverSignZ = cloverPatch.z + Math.cos(cloverSignAng) * (r + 0.45);
+  cloverSignY = heightAt(cloverSignX, cloverSignZ);
 const cloverSignPost = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 1.75, 6),
   new THREE.MeshStandardMaterial({ color: '#8b7150', roughness: 0.85, metalness: 0.04 }));
 cloverSignPost.position.set(cloverSignX, cloverSignY + 0.85, cloverSignZ);
@@ -1346,7 +1417,7 @@ const cloverFlag = new THREE.Mesh(new THREE.ShapeGeometry(cloverFlagShape),
 cloverFlag.position.set(cloverSignX, cloverSignY + 1.62, cloverSignZ);
 cloverFlag.rotation.y = cloverSignAng;
 scene.add(cloverFlag);
-function makeCloverTurfGeo(radius, rings, segs) {  // clover turf decal, draped on the terrain
+  function makeCloverTurfGeo(radius, rings, segs) {  // clover turf decal, draped on the terrain
   const rows = rings + 1, per = segs + 1, nV = rows * per;
   const pos = new Float32Array(nV * 3), col = new Float32Array(nV * 3), uvs = new Float32Array(nV * 2);
   for (let ri = 0; ri < rows; ri++) {
@@ -1381,20 +1452,23 @@ function makeCloverTurfGeo(radius, rings, segs) {  // clover turf decal, draped 
   g.computeVertexNormals();
   return g;
 }
-const cloverTurf = new THREE.Mesh(makeCloverTurfGeo(cloverPatch.r + 0.12, 6, 44),
+  cloverTurf = new THREE.Mesh(makeCloverTurfGeo(r + 0.12, 6, 44),
   new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0.0, side: THREE.DoubleSide }));
 cloverTurf.receiveShadow = true;
 scene.add(cloverTurf);
-const cloverBeaconH = 15;                         // light column so the plot reads from anywhere
-const cloverBeacon = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.66, cloverBeaconH, 12, 1, true),
+  const cloverBeacon = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.66, cloverBeaconH, 12, 1, true),
   new THREE.MeshBasicMaterial({ color: '#f6e7ae', transparent: true, opacity: 0.13,
     blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
 cloverBeacon.position.set(cloverPatch.x, cloverPatch.y + cloverBeaconH * 0.5 - 0.3, cloverPatch.z);
 scene.add(cloverBeacon);
-const cloverBeaconOrb = new THREE.Mesh(new THREE.SphereGeometry(0.3, 18, 12),
+  const cloverBeaconOrb = new THREE.Mesh(new THREE.SphereGeometry(0.3, 18, 12),
   new THREE.MeshBasicMaterial({ color: '#fff6d5' }));
 cloverBeaconOrb.position.set(cloverPatch.x, cloverPatch.y + cloverBeaconH - 0.3, cloverPatch.z);
-scene.add(cloverBeaconOrb);
+  scene.add(cloverBeaconOrb);
+  plotObjects.push(cloverRing, cloverRingInner, cloverTurf, cloverBeacon, cloverBeaconOrb,
+    cloverSignPost, cloverSignBoard, cloverSignFace, cloverFlag, ...cloverPegs);
+}
+buildCloverPlot(cloverPatch.r);
 function makeRockGeo(seed, radius, squash) {
   const icosa = new THREE.IcosahedronGeometry(radius, 2);
   const g = icosa.index ? icosa.toNonIndexed() : icosa;   // polyhedra are already non-indexed — avoid the three.js warning
@@ -2298,6 +2372,17 @@ addBtn('mist', 'mist', () => { state.mistOn = !state.mistOn; });
 addBtn('birds', 'birds', () => { state.birdsOn = !state.birdsOn; });
 addBtn('wheel', 'wheel', () => { state.wheelOn = !state.wheelOn; });
 addBtn('fx', 'fx', () => { state.fxOn = !state.fxOn; });
+const stageEl = document.getElementById('stage');
+function updateStageHud() {
+  if (!stageEl) return;
+  const cfg = STAGES[Math.min(stage, STAGES.length) - 1];
+  stageEl.textContent = stage <= STAGES.length
+    ? 'stage ' + stage + '/' + STAGES.length + ' · ' + cfg.three + ' × 3-leaf · ' + cfg.four +
+      ' × 4-leaf — tap the 4-leaf clover'
+    : 'all ' + STAGES.length + ' stages cleared · ' + cfg.three + ' × 3-leaf · ' + cfg.four + ' × 4-leaf';
+  stageEl.style.display = 'block';
+}
+updateStageHud();
 const helpEl = document.getElementById('help');
 const helpLines = [
   'drag: orbit camera',
@@ -2314,8 +2399,11 @@ const helpLines = [
   'phone: left stick walk · right drag',
   'phone: pinch zoom · wheel zoom',
   'space: reset roam position',
-  'clover plot: 10 × 3-leaf · 1 × 4-leaf (3clover.glb / 4clover.glb)',
-  'cream ring + 4 pegs + a clover sign',
+  'clover hunt: 4 stages, tap the one 4-leaf clover',
+  'stage 1: 10 · 2: 20 · 3: 30 · 4: 45 × 3-leaf (+1 four)',
+  'plot area: 1× → 10× → 50× → 100× the stage 1 area',
+  'all 4 stages use the authored 3clover / 4clover GLBs',
+  'cream ring + 4 pegs + a clover sign + marker beam',
   'plot: ' + cloverPatchHint,
   'roam: you start facing it ·',
   'bottom arrow keeps pointing to it'
@@ -2435,10 +2523,14 @@ function roamMove(dt) {
   camera.position.set(rover.x, gy + 1.68 + Math.sin(rover.bob * 1.7) * 0.06 * rover.gait, rover.z);
   camera.rotation.set(rover.pitch, rover.yaw, 0);
   if (camera.fov !== rover.fov) { camera.fov = rover.fov; camera.updateProjectionMatrix(); }
-  const fdx = cloverPatch.x - rover.x, fdz = cloverPatch.z - rover.z;
+  const tgt = fourLeaf || cloverPatch;            // aim the compass at the stage's 4-leaf plant
+  const fdx = tgt.x - rover.x, fdz = tgt.z - rover.z;
   const fdist = Math.hypot(fdx, fdz);
-  if (fdist < cloverPatch.r + 1.2) {
-    findEl.textContent = 'you are on the clover plot';
+  const pdx = cloverPatch.x - rover.x, pdz = cloverPatch.z - rover.z;
+  if (Math.hypot(pdx, pdz) < fieldR + 1.2) {
+    findEl.textContent = stage <= STAGES.length
+      ? 'stage ' + stage + ' — tap the 4-leaf clover'
+      : 'all stages cleared';
   } else {
     const rel = Math.atan2(fdx * Math.cos(rover.yaw) - fdz * Math.sin(rover.yaw),
       -fdx * Math.sin(rover.yaw) - fdz * Math.cos(rover.yaw));
@@ -2515,6 +2607,65 @@ window.addEventListener('pointermove', ptrMove, { passive: true });
 window.addEventListener('pointerup', ptrUp, { passive: true });
 window.addEventListener('pointercancel', ptrUp, { passive: true });
 window.addEventListener('wheel', ptrWheel, { passive: true });
+/* ---------- tap the 4-leaf clover: a short, still press clears the current stage ---------- */
+const picker = new THREE.Raycaster();
+const pickNdc = new THREE.Vector2();
+const pickPt = new THREE.Vector3();
+let tapId = -1, tapX = 0, tapY = 0, tapMoved = 0, tapT = 0;
+
+function tapDown(e) {
+  if (e.target !== renderer.domElement) return;
+  if (e.button === 2 || (e.buttons && (e.buttons & 2))) return;   // right button stays a camera control
+  tapId = e.pointerId; tapX = e.clientX; tapY = e.clientY; tapMoved = 0; tapT = performance.now();
+}
+function tapMove(e) {
+  if (e.pointerId !== tapId) return;
+  tapMoved += Math.hypot(e.clientX - tapX, e.clientY - tapY);
+  tapX = e.clientX; tapY = e.clientY;
+}
+function tapUp(e) {
+  if (e.pointerId !== tapId) return;
+  tapId = -1;
+  if (tapMoved > 26 || performance.now() - tapT > 900) return;   // a drag or a long hold is not a tap
+  pickFourLeaf(e.clientX, e.clientY);
+}
+function pickFourLeaf(cx, cy) {
+  if (stage > STAGES.length || !cloverFourMeshes.length) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return;
+  pickNdc.set(((cx - rect.left) / rect.width) * 2 - 1, -((cy - rect.top) / rect.height) * 2 + 1);
+  picker.setFromCamera(pickNdc, camera);
+  if (picker.intersectObjects(cloverFourMeshes, false).length) { advanceStage(); return; }
+  const px = (pickNdc.x * 0.5 + 0.5) * rect.width + rect.left;
+  const py = (-pickNdc.y * 0.5 + 0.5) * rect.height + rect.top;
+  for (const im of cloverFourMeshes) {
+    for (let k = 0; k < im.count; k++) {
+      im.getMatrixAt(k, _m4);
+      pickPt.setFromMatrixPosition(_m4);
+      pickPt.y += 0.34;                        // aim at the leaf head, not the base
+      if (camera.position.distanceTo(pickPt) < 0.3) { advanceStage(); return; }
+      pickPt.project(camera);
+      if (pickPt.z < -1 || pickPt.z > 1) continue;
+      const sx = (pickPt.x * 0.5 + 0.5) * rect.width + rect.left;
+      const sy = (-pickPt.y * 0.5 + 0.5) * rect.height + rect.top;
+      if (Math.hypot(sx - px, sy - py) <= 30) { advanceStage(); return; }   // forgiving on phones
+    }
+  }
+}
+function advanceStage() {
+  if (stage > STAGES.length) return;
+  stage++;
+  if (stage <= STAGES.length) {
+    buildCloverField(stage);
+    clearCloverPlot();
+    buildCloverPlot(fieldR);
+  }
+  updateStageHud();
+}
+window.addEventListener('pointerdown', tapDown, { passive: true });
+window.addEventListener('pointermove', tapMove, { passive: true });
+window.addEventListener('pointerup', tapUp, { passive: true });
+window.addEventListener('pointercancel', tapUp, { passive: true });
 window.addEventListener('keyup', (e) => {
   const k = e.key && e.key.length === 1 ? e.key.toLowerCase() : e.key;
   if (state.mode === 'roam' && isMoveKey(k)) setHeld(k, false);
@@ -2646,8 +2797,9 @@ requestAnimationFrame(tick);
 <div id="vig" style="opacity:1"></div>
 <div id="ui">
   <h1>田园 三次元</h1>
-  <div class="sub">Japanese countryside &mdash; procedural three.js + authored clover GLBs (3clover.glb / 4clover.glb)</div>
+  <div class="sub">Japanese countryside &mdash; procedural three.js + authored clover GLBs (3clover.glb / 4clover.glb) &middot; clover hunt: 4 stages</div>
   <div class="legend">drag: orbit &middot; wheel/pinch: zoom &middot; shift+drag: pan &middot; keys: m n d l &middot; o w c &middot; p f b g x r v h &middot; roam: WASD/arrows + touch stick</div>
+  <div class="stage" id="stage"></div>
 </div>
 <div id="pad"><div class="stick" id="stick"><div class="knob" id="knob"></div></div><div class="look" id="look"></div><div class="find" id="find"></div></div>
 <div id="btn"></div>
