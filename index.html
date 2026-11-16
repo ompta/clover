@@ -98,11 +98,12 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
    田园 三次元  —  Japanese countryside, procedural terrain + authored clover GLBs
    terrain · river · stone bridge · rice terraces · trees · rocks ·
    mountains · farmhouse · waterwheel · power lines · egrets · petals ·
-   clover hunt (4 stages, every one of them using the authored 3clover.glb / 4clover.glb in this folder:
-   10 → 20 → 30 → 45 three-leaf + 1 four-leaf, plot area 1× → 10× → 50× → 100× the stage 1 area; the counts
-   are capped by a ~1M verts/frame budget because one authored plant is 20,355 verts; ring + pegs + sign +
-   marker beam, ahead of roam start; tapping the 4-leaf clover clears the stage and replants the next one;
-   GLBs fall back to procedural clovers if unfetchable)
+   clover hunt (4 stages, every one of them the authored 3clover.glb / 4clover.glb plant: 10 → 100 → 500 →
+   1000 three-leaf + 1 four-leaf, plot area 1× → 10× → 50× → 100× the stage 1 area; one authored plant is
+   20,355 verts, so decimateClover grid-snaps it down per stage to keep every stage near ~1M verts a frame
+   and the single 4-leaf target plant always stays full detail; ring + pegs + sign + marker beam, ahead of
+   roam start; tapping the 4-leaf clover clears the stage and replants the next one; GLBs fall back to
+   procedural clovers if unfetchable)
    ===================================================================== */
 
 const WORLD = 340;          // terrain extent (metres)
@@ -199,6 +200,16 @@ function bridgeV(x, z) { const dx = x - bridgePt.x, dz = z - bridgePt.z; return 
 function bridgeArc(x, z) {
   const u = clamp(bridgeU(x, z), -BRIDGE_SPAN * 0.5, BRIDGE_SPAN * 0.5);
   return BRIDGE_BASE + BRIDGE_AMP * Math.cos((u / (BRIDGE_SPAN * 0.5)) * Math.PI * 0.5);
+}
+/* the deck is walkable: the arch profile is a function of bridgeV (the across-river axis),
+   the group sits at y0 = BRIDGE_BASE - 0.2 and the planks add 0.12 + 0.1 on top of it */
+function bridgeDeckAt(x, z) {                       // stand-on height of the bridge deck, or null off the deck
+  const v = bridgeV(x, z), u = bridgeU(x, z);
+  const av = Math.abs(v);
+  if (av > BRIDGE_SPAN * 0.5 + 1.8) return null;    // planks overhang the arch ends by 1.6 m
+  if (Math.abs(u) > 3.0) return null;               // stay inside the parapet rails (deck is 6.6 m wide)
+  const q = Math.min(av, BRIDGE_SPAN * 0.5) / (BRIDGE_SPAN * 0.5);
+  return BRIDGE_BASE - 0.2 + BRIDGE_AMP * (1 - q * q) + 0.22;
 }
 const roadPts = [];
 for (let i = -6; i <= 6; i++) {
@@ -323,6 +334,13 @@ function heightAt(x, z) {
     h = bed + (top - bed) * (t * t * (3 - 2 * t));
   }
   return h;
+}
+
+/* ---------- walkable surface: terrain plus anything you can stand on ---------- */
+function walkHeightAt(x, z) {                       // what the roam / tour cameras and the player stand on
+  const h = heightAt(x, z);
+  const deck = bridgeDeckAt(x, z);
+  return deck === null ? h : Math.max(h, deck);     // the river bed under the arch stays hidden by the deck
 }
 
 /* ---------- clover plot: the marked area the hunt starts in (it grows with each stage) ---------- */
@@ -722,7 +740,7 @@ terrainGeo.rotateX(-Math.PI / 2);
   const cGrass = new THREE.Color('#8aa85c'), cDry = new THREE.Color('#b6ab6e'), cMud = new THREE.Color('#5f5240');
   const cSand = new THREE.Color('#c3b28d'), cRock = new THREE.Color('#8b8779'), cDark = new THREE.Color('#5d5a54');
   const cSnow = new THREE.Color('#f1f4f8'), cPaddy = new THREE.Color('#59683f'), cPaddyG = new THREE.Color('#84a457');
-  const cPath = new THREE.Color('#9a9184'), cClover = new THREE.Color('#3d6a39');
+  const cPath = new THREE.Color('#9a9184');
   const g = new THREE.Color();
   for (let i = 0; i < n; i++) {
     const x = pos[i * 3], z = pos[i * 3 + 2], h = H[i];
@@ -747,9 +765,7 @@ terrainGeo.rotateX(-Math.PI / 2);
     else g.lerp(cSand, smoothstep(hw + 2.0, hw - 3.0, d) * 0.8);
     const rd = distToRoad(x, z);
     if (rd < 6.4) g.lerp(cPath, smoothstep(6.4, 3.2, rd) * 0.55);
-    const cpx = x - cloverPatch.x, cpz = z - cloverPatch.z;
-    const cpd = Math.hypot(cpx, cpz);
-    if (cpd < cloverPatch.r + 1.5) g.lerp(cClover, smoothstep(cloverPatch.r + 1.5, cloverPatch.r * 0.3, cpd) * 0.66);
+    // the clover plot keeps the normal ground colour — the cream ring, pegs, sign and beacon mark it out
     const shade = 0.94 + 0.06 * n2;
     col[i * 3] = g.r * shade; col[i * 3 + 1] = g.g * shade; col[i * 3 + 2] = g.b * shade;
   }
@@ -1220,32 +1236,72 @@ const cloverMats = cloverGlbs
   ? [makeWindMaterial('#ffffff', 0.05, 0.72, cloverGlbs.maps[0]), makeWindMaterial('#ffffff', 0.05, 0.72, cloverGlbs.maps[1])]
   : [makeWindMaterial('#ffffff', 0.05, 0.72), makeWindMaterial('#ffffff', 0.05, 0.72)];
 /* ---------- clover hunt: four stages, each cleared by tapping the single 4-leaf clover ---------- */
-/* Every stage uses the authored GLB plants (lod 3), so the plant looks identical all the way through.
-   Vertex budget: glbCloverGeo() merges the GLB and calls toNonIndexed(), so one 3-leaf plant is 20,355
-   verts / 6,785 tris and one 4-leaf plant is 26,748 verts. Instancing uploads that geometry once, but the
-   per-frame load is plants × verts, so keeping stage 4 under ~1M verts caps the field at ~46 plants.
-   The counts therefore grow gently while the plot areas still follow 1× → 10× → 50× → 100×. */
+/* Four stages, every one of them the authored 3clover.glb / 4clover.glb plant, at 10 → 100 → 500 → 1000
+   three-leaf (+1 four-leaf) and plot areas in the 1× → 10× → 50× → 100× ratio. Counts and area both grow,
+   so the mesh is what has to shrink: glbCloverGeo() merges the GLB and calls toNonIndexed(), making one
+   3-leaf plant 20,355 verts / 6,785 tris — a thousand of them would be 20.4M verts a frame. decimateClover
+   grid-snaps that authored mesh and drops the collapsed triangles down to a per-stage target, which keeps
+   every stage near ~1M verts. The single 4-leaf plant is never decimated, so the hunt target is full detail. */
 const STAGES = [
-  { three: 10, four: 1, area: 1,   lod: 3 },   // 11 plants · 230k verts · the stage 1 area
-  { three: 20, four: 1, area: 10,  lod: 3 },   // 21 plants · 434k verts · 10× the stage 1 area
-  { three: 30, four: 1, area: 50,  lod: 3 },   // 31 plants · 637k verts · 5× the stage 2 area
-  { three: 45, four: 1, area: 100, lod: 3 }    // 46 plants · 943k verts · 2× the stage 3 area
+  { three: 10,   four: 1, area: 1,   tris: 0 },     // 11 plants · 230k verts · the stage 1 area (0 = full authored mesh)
+  { three: 100,  four: 1, area: 10,  tris: 3300 },  // 101 plants · ~1.0M verts · 10× the stage 1 area
+  { three: 500,  four: 1, area: 50,  tris: 660 },   // 501 plants · ~1.0M verts · 5× the stage 2 area
+  { three: 1000, four: 1, area: 100, tris: 330 }    // 1001 plants · ~1.0M verts · 2× the stage 3 area
 ];
-const cloverLodGeos = [];                       // [lod] → [3-leaf geo, 4-leaf geo]; lod 3 = authored GLBs
-const cloverLodMats = [];                       // one wind-shaded material pair per lod (map only on the authored one)
-function cloverGeoFor(lod) {
-  if (!cloverLodGeos[lod]) {
-    cloverLodGeos[lod] = lod === 3 ? cloverGeos
-      : [makeCloverGeo(71, 3, 3.1, lod), makeCloverGeo(97, 4, 3.9, lod)];
+function weldClover(geo, eps) {                     // grid-snap a non-indexed plant, drop collapsed triangles
+  const pa = geo.attributes.position.array, na = geo.attributes.normal.array,
+    ua = geo.attributes.uv.array, ca = geo.attributes.color.array;
+  const tris = (pa.length / 9) | 0;
+  const tp = new Float32Array(pa.length), tn = new Float32Array(na.length),
+    tu = new Float32Array(ua.length), tc = new Float32Array(ca.length);
+  const g = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  let kept = 0;
+  for (let t = 0; t < tris; t++) {
+    const k = t * 9;
+    for (let v = 0; v < 3; v++) {
+      const i = k + v * 3;
+      g[v * 3] = Math.round(pa[i] / eps) * eps;
+      g[v * 3 + 1] = Math.round(pa[i + 1] / eps) * eps;
+      g[v * 3 + 2] = Math.round(pa[i + 2] / eps) * eps;
+    }
+    if (g[0] === g[3] && g[1] === g[4] && g[2] === g[5]) continue;
+    if (g[3] === g[6] && g[4] === g[7] && g[5] === g[8]) continue;
+    if (g[6] === g[0] && g[7] === g[1] && g[8] === g[2]) continue;
+    const o9 = kept * 9, o6 = kept * 6;
+    for (let v = 0; v < 9; v++) { tp[o9 + v] = g[v]; tn[o9 + v] = na[k + v]; tc[o9 + v] = ca[k + v]; }
+    for (let v = 0; v < 6; v++) tu[o6 + v] = ua[t * 6 + v];
+    kept++;
   }
-  return cloverLodGeos[lod];
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(tp.subarray(0, kept * 9), 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(tn.subarray(0, kept * 9), 3));
+  out.setAttribute('uv', new THREE.BufferAttribute(tu.subarray(0, kept * 6), 2));
+  out.setAttribute('color', new THREE.BufferAttribute(tc.subarray(0, kept * 9), 3));
+  out.computeBoundingBox(); out.computeBoundingSphere();
+  return { geo: out, tris: kept };
 }
-function cloverMatsFor(lod) {
-  if (!cloverLodMats[lod]) {
-    cloverLodMats[lod] = lod === 3 ? cloverMats
-      : [makeWindMaterial('#ffffff', 0.05, 0.72), makeWindMaterial('#ffffff', 0.05, 0.72)];
+function decimateClover(geo, targetTris) {          // binary-search the grid step that lands on targetTris
+  const fullTris = (geo.attributes.position.count / 3) | 0;
+  if (!targetTris || targetTris >= fullTris) return { geo, tris: fullTris };
+  const bb = geo.boundingBox;
+  const span = Math.max(bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z);
+  let lo = 0, hi = span * 0.5, best = null, bestTris = -1, small = null, smallTris = Infinity;
+  for (let it = 0; it < 16; it++) {
+    const mid = (lo + hi) * 0.5;
+    const r = weldClover(geo, mid);
+    if (r.tris < smallTris) { smallTris = r.tris; small = r; }
+    if (r.tris <= targetTris && r.tris > bestTris) { bestTris = r.tris; best = r; }
+    if (r.tris > targetTris) lo = mid; else hi = mid;
   }
-  return cloverLodMats[lod];
+  return best || small || { geo, tris: fullTris };
+}
+const cloverStageGeos = [];                       // [stage-1] → [3-leaf geo, 4-leaf geo]; the 4-leaf one is never decimated
+function cloverGeosFor(s) {
+  if (!cloverStageGeos[s - 1]) {
+    const cfg = STAGES[s - 1];
+    cloverStageGeos[s - 1] = [decimateClover(cloverGeos[0], cfg.tris).geo, cloverGeos[1]];
+  }
+  return cloverStageGeos[s - 1];
 }
 const applyClover = (it, p, q, s) => { p.set(it.x, it.y - 0.01, it.z); q.setFromAxisAngle(UP, it.rot); s.set(it.s, it.s, it.s); };
 const tintClover = (it) => { _col.setRGB(0.88 + it.t * 0.24, 0.94 + it.t * 0.18, 0.76 + it.t * 0.3); return _col; };
@@ -1273,7 +1329,7 @@ function buildCloverField(s) {
     list.push({ x, z, y: heightAt(x, z), rot: rnd() * 6.283185, sp: four ? 1 : 0,
       s: four ? 1.12 + rnd() * 0.1 : 0.86 + rnd() * 0.24, t: rnd() });   // same plant size at every stage
   }
-  const geos = cloverGeoFor(cfg.lod), mats = cloverMatsFor(cfg.lod);
+  const geos = cloverGeosFor(s), mats = cloverMats;   // authored material pair at every stage
   const threeList = [], fourList = [];
   for (const it of list) (it.sp === 1 ? fourList : threeList).push(it);
   for (const im of cloverMeshes) { scene.remove(im); im.dispose(); }   // geos/mats stay cached for the next stage
@@ -1324,7 +1380,7 @@ const cloverFlowers = addInstanced(cloverFlowerList, [makeCloverFlowerGeo(13, 3.
   (it, p, q, s) => { p.set(it.x, it.y - 0.01, it.z); q.setFromAxisAngle(UP, it.rot); s.set(it.s, it.s, it.s); },
   (it) => { _col.setRGB(0.92 + it.t * 0.14, 0.86 + it.t * 0.16, 0.80 + it.t * 0.2); return _col; });
 /* ---------- plot markers: ring + pegs + sign + turf + marker beam, rebuilt for each stage's field ---------- */
-let cloverRing = null, cloverRingInner = null, cloverPegs = [], cloverTurf = null;
+let cloverRing = null, cloverRingInner = null, cloverPegs = [];
 let cloverSignX = 0, cloverSignY = 0, cloverSignZ = 0, cloverSignAng = 0;
 const cloverBeaconH = 15;                         // light column so the plot reads from anywhere
 const plotObjects = [];                           // everything buildCloverPlot added, so a stage change can free it
@@ -1417,45 +1473,7 @@ const cloverFlag = new THREE.Mesh(new THREE.ShapeGeometry(cloverFlagShape),
 cloverFlag.position.set(cloverSignX, cloverSignY + 1.62, cloverSignZ);
 cloverFlag.rotation.y = cloverSignAng;
 scene.add(cloverFlag);
-  function makeCloverTurfGeo(radius, rings, segs) {  // clover turf decal, draped on the terrain
-  const rows = rings + 1, per = segs + 1, nV = rows * per;
-  const pos = new Float32Array(nV * 3), col = new Float32Array(nV * 3), uvs = new Float32Array(nV * 2);
-  for (let ri = 0; ri < rows; ri++) {
-    const rr = radius * (ri / rings);
-    for (let si = 0; si < per; si++) {
-      const a = (si / segs) * 6.283185;
-      const x = cloverPatch.x + Math.cos(a) * rr, z = cloverPatch.z + Math.sin(a) * rr;
-      const k = ri * per + si;
-      pos[k * 3] = x; pos[k * 3 + 1] = heightAt(x, z) + 0.022; pos[k * 3 + 2] = z;
-      uvs[k * 2] = 0.5 + Math.cos(a) * rr / radius * 0.5;
-      uvs[k * 2 + 1] = 0.5 + Math.sin(a) * rr / radius * 0.5;
-      const n = fbm(x * 2.4, z * 2.4, 3) * 0.5 + 0.5;
-      const fleck = smoothstep(0.6, 0.86, n) * 0.2;
-      const edge = 1 - smoothstep(radius * 0.68, radius, rr) * 0.3;
-      col[k * 3] = (0.16 + 0.07 * n + fleck) * edge;
-      col[k * 3 + 1] = (0.3 + 0.16 * n + fleck) * edge;
-      col[k * 3 + 2] = (0.15 + 0.07 * n + fleck * 0.7) * edge;
-    }
-  }
-  const idx = [];
-  for (let ri = 0; ri < rings; ri++) {
-    for (let si = 0; si < segs; si++) {
-      const a = ri * per + si;
-      idx.push(a, a + 1, a + 1 + per, a, a + 1 + per, a + per);
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  g.setIndex(idx);
-  g.computeVertexNormals();
-  return g;
-}
-  cloverTurf = new THREE.Mesh(makeCloverTurfGeo(r + 0.12, 6, 44),
-  new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0.0, side: THREE.DoubleSide }));
-cloverTurf.receiveShadow = true;
-scene.add(cloverTurf);
+  // no turf decal here: the plot ground keeps the normal terrain colour
   const cloverBeacon = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.66, cloverBeaconH, 12, 1, true),
   new THREE.MeshBasicMaterial({ color: '#f6e7ae', transparent: true, opacity: 0.13,
     blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
@@ -1465,7 +1483,7 @@ scene.add(cloverBeacon);
   new THREE.MeshBasicMaterial({ color: '#fff6d5' }));
 cloverBeaconOrb.position.set(cloverPatch.x, cloverPatch.y + cloverBeaconH - 0.3, cloverPatch.z);
   scene.add(cloverBeaconOrb);
-  plotObjects.push(cloverRing, cloverRingInner, cloverTurf, cloverBeacon, cloverBeaconOrb,
+  plotObjects.push(cloverRing, cloverRingInner, cloverBeacon, cloverBeaconOrb,
     cloverSignPost, cloverSignBoard, cloverSignFace, cloverFlag, ...cloverPegs);
 }
 buildCloverPlot(cloverPatch.r);
@@ -2400,7 +2418,7 @@ const helpLines = [
   'phone: pinch zoom · wheel zoom',
   'space: reset roam position',
   'clover hunt: 4 stages, tap the one 4-leaf clover',
-  'stage 1: 10 · 2: 20 · 3: 30 · 4: 45 × 3-leaf (+1 four)',
+  'stage 1: 10 · 2: 100 · 3: 500 · 4: 1000 × 3-leaf (+1 four)',
   'plot area: 1× → 10× → 50× → 100× the stage 1 area',
   'all 4 stages use the authored 3clover / 4clover GLBs',
   'cream ring + 4 pegs + a clover sign + marker beam',
@@ -2452,8 +2470,8 @@ function updateCamera(dt) {
     const p = roadCurve.getPointAt(state.walkT);
     const look = roadCurve.getPointAt((state.walkT + 0.035) % 1);
     const bob = Math.sin(state.walkT * 1100) * 0.045;
-    camera.position.set(p.x, heightAt(p.x, p.z) + 1.72 + bob, p.z);
-    cameraLookAt.set(look.x, heightAt(look.x, look.z) + 2.1, look.z);
+    camera.position.set(p.x, walkHeightAt(p.x, p.z) + 1.72 + bob, p.z);
+    cameraLookAt.set(look.x, walkHeightAt(look.x, look.z) + 2.1, look.z);
     camera.lookAt(cameraLookAt);
   } else if (state.mode === 'cine') {
     state.cineT = (state.cineT + dt * 0.012) % 1;
@@ -2461,9 +2479,9 @@ function updateCamera(dt) {
     const tan = riverCurve.getTangentAt(state.cineT);
     const side = 15 * Math.sin(state.cineT * Math.PI * 2);
     const px = p.x - tan.z * side, pz = p.z + tan.x * side;
-    camera.position.set(px, Math.max(heightAt(px, pz), WATER_Y + 0.6) + 3.6, pz);
+    camera.position.set(px, Math.max(walkHeightAt(px, pz), WATER_Y + 0.6) + 3.6, pz);
     const focus = riverCurve.getPointAt((state.cineT + 0.07) % 1);
-    cameraLookAt.set(focus.x, Math.max(heightAt(focus.x, focus.z), WATER_Y) + 2.4, focus.z);
+    cameraLookAt.set(focus.x, Math.max(walkHeightAt(focus.x, focus.z), WATER_Y) + 2.4, focus.z);
     camera.lookAt(cameraLookAt);
   } else {
     controls.target.set(bridgePt.x, 3.4, bridgePt.z);
@@ -2515,11 +2533,12 @@ function roamMove(dt) {
     const lim = WORLD * 0.5 - 8;
     const nx = clamp(rover.x + ux * step, -lim, lim);
     const nz = clamp(rover.z + uz * step, -lim, lim);
-    const gh = heightAt(nx, nz);
-    if (gh > WATER_Y - 1.3 && slopeAt(nx, nz) < 0.95) { rover.x = nx; rover.z = nz; }
+    const deck = bridgeDeckAt(nx, nz);              // the arch is part of the walkable surface
+    const gh = deck === null ? heightAt(nx, nz) : Math.max(heightAt(nx, nz), deck);
+    if (gh > WATER_Y - 1.3 && (deck !== null || slopeAt(nx, nz) < 0.95)) { rover.x = nx; rover.z = nz; }
     rover.bob += step * 1.15;
   }
-  const gy = Math.max(heightAt(rover.x, rover.z), WATER_Y - 0.35);
+  const gy = Math.max(walkHeightAt(rover.x, rover.z), WATER_Y - 0.35);
   camera.position.set(rover.x, gy + 1.68 + Math.sin(rover.bob * 1.7) * 0.06 * rover.gait, rover.z);
   camera.rotation.set(rover.pitch, rover.yaw, 0);
   if (camera.fov !== rover.fov) { camera.fov = rover.fov; camera.updateProjectionMatrix(); }
@@ -2767,7 +2786,7 @@ function tick() {
   sunTarget.position.set(0, 0, 0);
   sunLight.position.set(sunDir.x * 130, Math.max(sunDir.y, 0.34) * 130, sunDir.z * 130);
   if (state.mode === 'roam') {
-    sunTarget.position.set(rover.x, heightAt(rover.x, rover.z), rover.z);
+    sunTarget.position.set(rover.x, walkHeightAt(rover.x, rover.z), rover.z);
     sunLight.position.set(rover.x + sunDir.x * 130, Math.max(sunDir.y, 0.34) * 130, rover.z + sunDir.z * 130);
   }
   const preset = PRESETS[state.preset];
