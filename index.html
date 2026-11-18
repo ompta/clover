@@ -75,6 +75,26 @@
   @media (pointer: coarse) {
     #help { width: 260px; font-size: 12px; top: 26%; }
   }
+  #win {
+    position: fixed; left: 50%; top: 42%; transform: translate(-50%, -50%); width: 400px;
+    display: none; pointer-events: none; font-size: 13px; line-height: 1.55;
+    white-space: pre-wrap; color: #f7f1df; text-shadow: 0 1px 2px rgba(0,0,0,.85);
+    background: rgba(15,19,25,.84); border: 1px solid rgba(246,231,190,.46);
+    border-radius: 12px; padding: 14px 18px 16px; box-shadow: 0 8px 22px rgba(0,0,0,.42);
+  }
+  #win .t { font-size: 17px; font-weight: 700; letter-spacing: .05em; margin: 0 0 6px; }
+  #win button {
+    pointer-events: auto; cursor: pointer; display: inline-block; margin: 12px 0 0;
+    border: 1px solid rgba(246,231,190,.55); background: rgba(26,31,38,.92);
+    color: #f7f1df; border-radius: 8px; padding: 8px 14px; font-size: 13px;
+    letter-spacing: .05em; font-family: inherit;
+  }
+  #win button:hover { background: rgba(246,231,190,.92); color: #161b21; }
+  @media (pointer: coarse) {
+    #win { width: 300px; font-size: 12px; top: 34%; }
+    #win .t { font-size: 15px; }
+    #win button { padding: 12px 18px; font-size: 13px; }
+  }
 </style>
 <script type="importmap">
 {
@@ -343,6 +363,8 @@ function walkHeightAt(x, z) {                       // what the roam / tour came
   return deck === null ? h : Math.max(h, deck);     // the river bed under the arch stays hidden by the deck
 }
 
+/* ---------- one random seed per page load: the hunt spot and every planting follow it ---------- */
+const huntSeed = 1 + ((Math.random() * 0x7ffffffe) | 0);   // fresh each game start; stages add their own offset
 /* ---------- clover plot: the marked area the hunt starts in (it grows with each stage) ---------- */
 const roamAnchor = (() => {                       // where roam mode drops the player, and which way it faces
   const p = roadCurve.getPointAt(0.4), t = roadCurve.getTangentAt(0.4).setY(0).normalize();
@@ -373,28 +395,33 @@ const cloverPatch = (() => {
     return true;
   };
   let px = null, pz = null;
+  const rnd = makeRng(huntSeed);                  // a different hunt spot every page load
   for (let pass = 0; pass < 3 && px === null; pass++) {
     const maxSpread = [0.55, 0.9, 1.6][pass];     // prefer flat ground, relax if the verge is bumpy
-    let best = -1e9;
-    for (let i = 0; i <= 150; i++) {              // march along the lane near the spawn
-      const t = 0.4 + (i / 150) * 0.16;
-      const p = roadCurve.getPointAt(t), tan = roadCurve.getTangentAt(t).setY(0).normalize();
-      for (let s = 0; s < 2; s++) {               // both verges
-        const side = s === 0 ? 1 : -1;
-        for (let k = 0; k < 4; k++) {             // 7 .. 11.8 m out from the lane centre
-          const off = 7.0 + k * 1.6;
-          const x = p.x - tan.z * off * side, z = p.z + tan.x * off * side;
-          if (!clear(x, z)) continue;
-          const sp = spread(x, z);
-          if (sp > maxSpread) continue;
-          const dx = x - roamAnchor.x, dz = z - roamAnchor.z, dd = Math.hypot(dx, dz);
-          if (dd < 11 || dd > 22) continue;       // a short walk from the spawn
-          if (dx * roamAnchor.fx + dz * roamAnchor.fz < -0.2 * dd) continue;  // not behind
-          const score = (1 - sp / maxSpread) * 2.2 + (1 - Math.abs(dd - 15) / 7) * 1.4;
-          if (score > best) { best = score; px = x; pz = z; }
-        }
+    const cands = [];
+    for (let i = 0; i < 700; i++) {              // random ground around the spawn, plus the lane verges
+      let x, z;
+      if (rnd() < 0.5) {                         // half the samples hug the road
+        const t = 0.32 + rnd() * 0.28;
+        const p = roadCurve.getPointAt(t), tan = roadCurve.getTangentAt(t).setY(0).normalize();
+        const side = rnd() < 0.5 ? 1 : -1;
+        const off = 7.0 + rnd() * 8.0;           // 7 .. 15 m out from the lane centre
+        x = p.x - tan.z * off * side; z = p.z + tan.x * off * side;
+      } else {                                   // the rest scatter anywhere around the spawn
+        const ang = rnd() * 6.283185, dd = 9 + rnd() * 22;
+        x = roamAnchor.x + Math.cos(ang) * dd; z = roamAnchor.z + Math.sin(ang) * dd;
       }
+      if (!clear(x, z)) continue;
+      const sp = spread(x, z);
+      if (sp > maxSpread) continue;
+      const dx = x - roamAnchor.x, dz = z - roamAnchor.z, dd = Math.hypot(dx, dz);
+      if (dd < 10 || dd > 30) continue;          // a short walk from the spawn
+      if (dx * roamAnchor.fx + dz * roamAnchor.fz < -0.2 * dd) continue;  // not behind
+      cands.push({ x, z });
     }
+    if (!cands.length) continue;                  // no flat-enough verge this pass, relax and try again
+    const pick = cands[(rnd() * cands.length) | 0];   // any valid spot will do, so the plot moves each game
+    px = pick.x; pz = pick.z;
   }
   if (px === null) {                              // last-resort: verge 14 m ahead of the spawn
     px = roamAnchor.x + roamAnchor.fx * 14 - roamAnchor.fz * 7.4;
@@ -1235,7 +1262,7 @@ const cloverGeos = cloverGlbs ? cloverGlbs.geos : [makeCloverGeo(71, 3, 3.1), ma
 const cloverMats = cloverGlbs
   ? [makeWindMaterial('#ffffff', 0.05, 0.72, cloverGlbs.maps[0]), makeWindMaterial('#ffffff', 0.05, 0.72, cloverGlbs.maps[1])]
   : [makeWindMaterial('#ffffff', 0.05, 0.72), makeWindMaterial('#ffffff', 0.05, 0.72)];
-/* ---------- clover hunt: four stages, each cleared by tapping the single 4-leaf clover ---------- */
+/* ---------- clover hunt: random plot spot per load, four stages, each cleared by tapping the single 4-leaf clover ---------- */
 /* Four stages, every one of them the authored 3clover.glb / 4clover.glb plant, at 10 → 100 → 500 → 1000
    three-leaf (+1 four-leaf) and plot areas in the 1× → 10× → 50× → 100× ratio. Counts and area both grow,
    so the mesh is what has to shrink: glbCloverGeo() merges the GLB and calls toNonIndexed(), making one
@@ -1312,18 +1339,18 @@ let cloverList = [];
 let cloverMeshes = [];
 let cloverFourMeshes = [];                      // the instanced meshes holding the single 4-leaf plant
 let fourLeaf = null;                            // the one 4-leaf plant of the current stage (the hunt target)
+let pendingNext = false;                        // true once a stage is cleared and its congrats box is waiting for the next-stage button
 
 function buildCloverField(s) {
   const cfg = STAGES[s - 1];
   fieldR = cloverPatch.r * Math.sqrt(cfg.area);   // area ratios → radius ratio is the square root
-  const rnd = makeRng(1409 + s * 977);
+  const rnd = makeRng(huntSeed + s * 977);        // re-rolled every page load, and different for every stage
   const N = cfg.three + cfg.four;
   const fourIdx = (rnd() * N) | 0;
   const list = [];
   for (let i = 0; i < N; i++) {
-    const t = (i + 0.5) / N;
-    const rad = fieldR * 0.62 * Math.sqrt(t);
-    const ang = i * 2.399963 + (rnd() - 0.5) * 0.6;
+    const rad = fieldR * 0.62 * Math.sqrt(rnd());   // uniform in the disc, no spiral lattice
+    const ang = rnd() * 6.283185;
     const x = cloverPatch.x + Math.cos(ang) * rad, z = cloverPatch.z + Math.sin(ang) * rad;
     const four = i === fourIdx;
     list.push({ x, z, y: heightAt(x, z), rot: rnd() * 6.283185, sp: four ? 1 : 0,
@@ -1367,10 +1394,10 @@ function makeCloverFlowerGeo(seed, scale) {             // pink-white clover hea
 }
 const cloverFlowerList = [];
 {
-  const rnd = makeRng(5507);
+  const rnd = makeRng(huntSeed + 5507);           // the sign's flower cluster scatters with the plot
   for (let i = 0; i < 5; i++) {
     const rad = cloverPatch.r * (0.22 + rnd() * 0.56);
-    const ang = i * 1.9 + rnd() * 2.2;
+    const ang = rnd() * 6.283185;
     const x = cloverPatch.x + Math.cos(ang) * rad, z = cloverPatch.z + Math.sin(ang) * rad;
     cloverFlowerList.push({ x, z, y: heightAt(x, z), rot: rnd() * 6.283185, s: 0.85 + rnd() * 0.3, t: rnd(), sp: i % 2 });
   }
@@ -2391,13 +2418,16 @@ addBtn('birds', 'birds', () => { state.birdsOn = !state.birdsOn; });
 addBtn('wheel', 'wheel', () => { state.wheelOn = !state.wheelOn; });
 addBtn('fx', 'fx', () => { state.fxOn = !state.fxOn; });
 const stageEl = document.getElementById('stage');
+const winEl = document.getElementById('win');   // the stage-clear message box (congrats + next stage button)
 function updateStageHud() {
   if (!stageEl) return;
   const cfg = STAGES[Math.min(stage, STAGES.length) - 1];
-  stageEl.textContent = stage <= STAGES.length
-    ? 'stage ' + stage + '/' + STAGES.length + ' · ' + cfg.three + ' × 3-leaf · ' + cfg.four +
-      ' × 4-leaf — tap the 4-leaf clover'
-    : 'all ' + STAGES.length + ' stages cleared · ' + cfg.three + ' × 3-leaf · ' + cfg.four + ' × 4-leaf';
+  stageEl.textContent = pendingNext
+    ? 'stage ' + stage + '/' + STAGES.length + ' cleared — press next stage'
+    : stage <= STAGES.length
+      ? 'stage ' + stage + '/' + STAGES.length + ' · ' + cfg.three + ' × 3-leaf · ' + cfg.four +
+        ' × 4-leaf — tap the 4-leaf clover'
+      : 'all ' + STAGES.length + ' stages cleared · ' + cfg.three + ' × 3-leaf · ' + cfg.four + ' × 4-leaf';
   stageEl.style.display = 'block';
 }
 updateStageHud();
@@ -2418,6 +2448,7 @@ const helpLines = [
   'phone: pinch zoom · wheel zoom',
   'space: reset roam position',
   'clover hunt: 4 stages, tap the one 4-leaf clover',
+  'clear a stage: congrats box · j or next stage button',
   'stage 1: 10 · 2: 100 · 3: 500 · 4: 1000 × 3-leaf (+1 four)',
   'plot area: 1× → 10× → 50× → 100× the stage 1 area',
   'all 4 stages use the authored 3clover / 4clover GLBs',
@@ -2547,9 +2578,11 @@ function roamMove(dt) {
   const fdist = Math.hypot(fdx, fdz);
   const pdx = cloverPatch.x - rover.x, pdz = cloverPatch.z - rover.z;
   if (Math.hypot(pdx, pdz) < fieldR + 1.2) {
-    findEl.textContent = stage <= STAGES.length
-      ? 'stage ' + stage + ' — tap the 4-leaf clover'
-      : 'all stages cleared';
+    findEl.textContent = pendingNext
+      ? 'stage ' + stage + ' cleared — press next stage'
+      : stage <= STAGES.length
+        ? 'stage ' + stage + ' — tap the 4-leaf clover'
+        : 'all stages cleared';
   } else {
     const rel = Math.atan2(fdx * Math.cos(rover.yaw) - fdz * Math.sin(rover.yaw),
       -fdx * Math.sin(rover.yaw) - fdz * Math.cos(rover.yaw));
@@ -2649,12 +2682,12 @@ function tapUp(e) {
   pickFourLeaf(e.clientX, e.clientY);
 }
 function pickFourLeaf(cx, cy) {
-  if (stage > STAGES.length || !cloverFourMeshes.length) return;
+  if (stage > STAGES.length || pendingNext || !cloverFourMeshes.length) return;
   const rect = renderer.domElement.getBoundingClientRect();
   if (rect.width < 1 || rect.height < 1) return;
   pickNdc.set(((cx - rect.left) / rect.width) * 2 - 1, -((cy - rect.top) / rect.height) * 2 + 1);
   picker.setFromCamera(pickNdc, camera);
-  if (picker.intersectObjects(cloverFourMeshes, false).length) { advanceStage(); return; }
+  if (picker.intersectObjects(cloverFourMeshes, false).length) { clearStage(); return; }
   const px = (pickNdc.x * 0.5 + 0.5) * rect.width + rect.left;
   const py = (-pickNdc.y * 0.5 + 0.5) * rect.height + rect.top;
   for (const im of cloverFourMeshes) {
@@ -2662,23 +2695,54 @@ function pickFourLeaf(cx, cy) {
       im.getMatrixAt(k, _m4);
       pickPt.setFromMatrixPosition(_m4);
       pickPt.y += 0.34;                        // aim at the leaf head, not the base
-      if (camera.position.distanceTo(pickPt) < 0.3) { advanceStage(); return; }
+      if (camera.position.distanceTo(pickPt) < 0.3) { clearStage(); return; }
       pickPt.project(camera);
       if (pickPt.z < -1 || pickPt.z > 1) continue;
       const sx = (pickPt.x * 0.5 + 0.5) * rect.width + rect.left;
       const sy = (-pickPt.y * 0.5 + 0.5) * rect.height + rect.top;
-      if (Math.hypot(sx - px, sy - py) <= 30) { advanceStage(); return; }   // forgiving on phones
+      if (Math.hypot(sx - px, sy - py) <= 30) { clearStage(); return; }   // forgiving on phones
     }
   }
 }
-function advanceStage() {
-  if (stage > STAGES.length) return;
-  stage++;
-  if (stage <= STAGES.length) {
-    buildCloverField(stage);
-    clearCloverPlot();
-    buildCloverPlot(fieldR);
+/* ---------- stage clear: congrats box first, the next-stage button is what starts the next hunt ---------- */
+function clearStage() {                              // the 4-leaf tap: clear the stage, show the box, wait for the button
+  if (stage > STAGES.length || pendingNext) return;
+  pendingNext = true;
+  const done = STAGES[stage - 1];
+  const last = stage >= STAGES.length;
+  const nx = last ? null : STAGES[stage];
+  if (winEl) {
+    winEl.textContent = '';
+    const head = document.createElement('div');
+    head.className = 't';
+    head.textContent = '🍀 congratulations — stage ' + stage + ' of ' + STAGES.length + ' cleared';
+    winEl.appendChild(head);
+    const body = document.createElement('div');
+    body.textContent =
+      'you found the single 4-leaf clover among ' + done.three + ' × 3-leaf plants in the marked plot' +
+      (last
+        ? '\nall ' + STAGES.length + ' stages cleared — the whole hunt is done'
+        : '\nnext up: stage ' + (stage + 1) + ' · ' + nx.three + ' × 3-leaf + ' + nx.four + ' × 4-leaf · ' + nx.area +
+          '× the stage 1 plot');
+    winEl.appendChild(body);
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = last ? '↺ play again' : '▶ next stage';
+    b.addEventListener('click', () => { try { nextStage(); } catch (e) { showError(e); } });
+    winEl.appendChild(b);
+    winEl.style.display = 'block';
   }
+  updateStageHud();
+}
+function nextStage() {                               // the next-stage button: stage+1, replanted (restart after the last)
+  if (!pendingNext) return;
+  const last = stage >= STAGES.length;
+  pendingNext = false;
+  if (winEl) { winEl.style.display = 'none'; winEl.textContent = ''; }
+  stage = last ? 1 : stage + 1;
+  buildCloverField(stage);
+  clearCloverPlot();
+  buildCloverPlot(fieldR);
   updateStageHud();
 }
 window.addEventListener('pointerdown', tapDown, { passive: true });
@@ -2707,7 +2771,8 @@ const keyActions = {
   x: () => { state.wheelOn = !state.wheelOn; },
   r: () => { state.fxOn = !state.fxOn; },
   v: () => { state.vignette = state.vignette > 0 ? 0 : 0.42; vigEl.style.opacity = state.vignette > 0 ? '1' : '0'; },
-  h: () => toggleHelp()
+  h: () => toggleHelp(),
+  j: () => nextStage()
 };
 window.addEventListener('keydown', (e) => {
   const k = e.key && e.key.length === 1 ? e.key.toLowerCase() : e.key;
@@ -2823,6 +2888,7 @@ requestAnimationFrame(tick);
 <div id="pad"><div class="stick" id="stick"><div class="knob" id="knob"></div></div><div class="look" id="look"></div><div class="find" id="find"></div></div>
 <div id="btn"></div>
 <pre id="help"></pre>
+<div id="win"></div>
 <div id="err"></div>
 </body>
 </html>
